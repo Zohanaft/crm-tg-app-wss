@@ -1,0 +1,24 @@
+{
+  "name": "crm-tg-app-wss",
+  "version": "1.0.0",
+  "description": "Workspace rooms WSS service",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Zohanaft/crm-tg-app-wss.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Zohanaft/crm-tg-app-wss/issues"
+  },
+  "homepage": "https://github.com/Zohanaft/crm-tg-app-wss#readme",
+  "dependencies": {
+    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.55.0"
+  }
+}
