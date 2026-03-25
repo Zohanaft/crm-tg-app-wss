@@ -49,12 +49,14 @@ function collectJsonBody(res, done) {
   });
 }
 
-async function authorizeToken(accessToken) {
-  if (!accessToken) return null;
+async function authorizeWithCookie(accessCookie) {
+  if (!accessCookie) return null;
   const response = await fetch(`${BACKEND_INTERNAL_URL}/workspace/wss/auth`, {
     method: 'GET',
     headers: {
-      authorization: `Bearer ${accessToken}`,
+      // Cookies are HttpOnly on the main domain; browser sends them automatically during WS handshake.
+      // We forward them to the backend so JwtStrategy can read `req.cookies.access_token`.
+      cookie: accessCookie,
     },
   });
   if (!response.ok) return null;
@@ -85,15 +87,21 @@ app.ws('/api/wss', {
   compression: uWS.DISABLED,
   open: async (ws) => {
     ws.userData.rooms = new Set();
-    const auth = await authorizeToken(ws.userData.token);
+    const auth = await authorizeWithCookie(ws.userData.cookie);
     if (!auth || !Array.isArray(auth.workspaceIds)) {
       ws.end(4001, 'unauthorized');
       return;
     }
 
+    ws.userData.allowedWorkspaceIds = new Set(auth.workspaceIds);
     const workspaceIds = ws.userData.workspaceId
       ? auth.workspaceIds.filter((id) => id === ws.userData.workspaceId)
       : auth.workspaceIds;
+
+    if (ws.userData.workspaceId && !ws.userData.allowedWorkspaceIds.has(ws.userData.workspaceId)) {
+      ws.end(4002, 'workspace_forbidden');
+      return;
+    }
 
     workspaceIds.forEach((workspaceId) => {
       const room = touchRoom(workspaceId, ws.userData.socketId);
@@ -114,6 +122,10 @@ app.ws('/api/wss', {
     if (!data || typeof data !== 'object') return;
 
     if (data.type === 'workspace:join' && typeof data.workspaceId === 'string') {
+      if (ws.userData.allowedWorkspaceIds && !ws.userData.allowedWorkspaceIds.has(data.workspaceId)) {
+        ws.end(4401, 'workspace_forbidden');
+        return;
+      }
       const room = touchRoom(data.workspaceId, ws.userData.socketId);
       ws.subscribe(room);
       ws.userData.rooms.add(room);
@@ -137,13 +149,13 @@ app.ws('/api/wss', {
   },
   upgrade: (res, req, context) => {
     const query = new URLSearchParams(req.getQuery() || '');
-    const token = query.get('token') || '';
     const workspaceId = query.get('workspaceId') || '';
     const socketId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const cookie = req.getHeader('cookie') || '';
 
     res.upgrade(
       {
-        token,
+        cookie,
         workspaceId,
         socketId,
       },
