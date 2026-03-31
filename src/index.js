@@ -8,6 +8,31 @@ const MAX_BODY_SIZE = 1024 * 1024;
 const app = uWS.App();
 const roomConnections = new Map();
 
+/** Room lifecycle logs (disable: WSS_ROOM_LOGS=0). Prefix wss-room — grep-friendly on Windows. */
+const ROOM_LOGS = process.env.WSS_ROOM_LOGS !== '0';
+
+function roomLog(msg, extra) {
+  if (!ROOM_LOGS) return;
+  if (extra !== undefined) {
+    // eslint-disable-next-line no-console
+    console.log(`[wss-room] ${msg}`, extra);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(`[wss-room] ${msg}`);
+  }
+}
+
+/** Always logged: handshake / open / auth (so you see traffic even if room trace is off). */
+function wssTrace(msg, extra) {
+  if (extra !== undefined) {
+    // eslint-disable-next-line no-console
+    console.log(`[wss] ${msg}`, extra);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(`[wss] ${msg}`);
+  }
+}
+
 function roomName(workspaceId) {
   return `workspace:${workspaceId}`;
 }
@@ -65,10 +90,14 @@ async function authorizeWithCookie(accessCookie) {
 
 function touchRoom(workspaceId, socketId) {
   const room = roomName(workspaceId);
-  if (!roomConnections.has(room)) {
+  const isNewRoom = !roomConnections.has(room);
+  if (isNewRoom) {
     roomConnections.set(room, new Set());
+    roomLog('room created (first socket)', { room, workspaceId, socketId });
   }
   roomConnections.get(room).add(socketId);
+  const members = roomConnections.get(room).size;
+  roomLog('socket joined room', { room, socketId, membersInRoom: members });
   return room;
 }
 
@@ -76,8 +105,11 @@ function releaseRoom(room, socketId) {
   if (!roomConnections.has(room)) return;
   const sockets = roomConnections.get(room);
   sockets.delete(socketId);
-  if (sockets.size === 0) {
+  const left = sockets.size;
+  roomLog('socket left room', { room, socketId, membersInRoom: left });
+  if (left === 0) {
     roomConnections.delete(room);
+    roomLog('room removed (empty)', { room });
   }
 }
 
@@ -86,27 +118,42 @@ app.ws('/api/wss', {
   maxPayloadLength: 16 * 1024,
   compression: uWS.DISABLED,
   open: async (ws) => {
-    ws.userData.rooms = new Set();
-    const auth = await authorizeWithCookie(ws.userData.cookie);
+    const ud = ws.getUserData();
+    wssTrace('open start', { socketId: ud.socketId });
+    ud.rooms = new Set();
+    const auth = await authorizeWithCookie(ud.cookie);
     if (!auth || !Array.isArray(auth.workspaceIds)) {
+      wssTrace('open auth failed (unauthorized)', { socketId: ud.socketId });
       ws.end(4001, 'unauthorized');
       return;
     }
 
-    ws.userData.allowedWorkspaceIds = new Set(auth.workspaceIds);
-    const workspaceIds = ws.userData.workspaceId
-      ? auth.workspaceIds.filter((id) => id === ws.userData.workspaceId)
+    ud.allowedWorkspaceIds = new Set(auth.workspaceIds);
+    const workspaceIds = ud.workspaceId
+      ? auth.workspaceIds.filter((id) => id === ud.workspaceId)
       : auth.workspaceIds;
 
-    if (ws.userData.workspaceId && !ws.userData.allowedWorkspaceIds.has(ws.userData.workspaceId)) {
+    if (ud.workspaceId && !ud.allowedWorkspaceIds.has(ud.workspaceId)) {
+      wssTrace('open workspace_forbidden', {
+        socketId: ud.socketId,
+        workspaceId: ud.workspaceId,
+      });
       ws.end(4002, 'workspace_forbidden');
       return;
     }
 
+    wssTrace('open auth ok', { socketId: ud.socketId, workspaceCount: workspaceIds.length });
+    roomLog('open subscribe workspaces', {
+      socketId: ud.socketId,
+      filterWorkspaceId: ud.workspaceId || null,
+      workspaceIds,
+      count: workspaceIds.length,
+    });
+
     workspaceIds.forEach((workspaceId) => {
-      const room = touchRoom(workspaceId, ws.userData.socketId);
+      const room = touchRoom(workspaceId, ud.socketId);
       ws.subscribe(room);
-      ws.userData.rooms.add(room);
+      ud.rooms.add(room);
     });
 
     ws.send(
@@ -117,34 +164,46 @@ app.ws('/api/wss', {
     );
   },
   message: (ws, message) => {
+    const ud = ws.getUserData();
     const text = Buffer.from(message).toString('utf8');
     const data = safeJsonParse(text);
     if (!data || typeof data !== 'object') return;
 
     if (data.type === 'workspace:join' && typeof data.workspaceId === 'string') {
-      if (ws.userData.allowedWorkspaceIds && !ws.userData.allowedWorkspaceIds.has(data.workspaceId)) {
+      if (ud.allowedWorkspaceIds && !ud.allowedWorkspaceIds.has(data.workspaceId)) {
+        roomLog('workspace:join denied', {
+          socketId: ud.socketId,
+          workspaceId: data.workspaceId,
+        });
         ws.end(4401, 'workspace_forbidden');
         return;
       }
-      const room = touchRoom(data.workspaceId, ws.userData.socketId);
+      roomLog('msg workspace:join', { socketId: ud.socketId, workspaceId: data.workspaceId });
+      const room = touchRoom(data.workspaceId, ud.socketId);
       ws.subscribe(room);
-      ws.userData.rooms.add(room);
+      ud.rooms.add(room);
       ws.send(JSON.stringify({ type: 'workspace:joined', workspaceId: data.workspaceId }));
       return;
     }
 
     if (data.type === 'workspace:leave' && typeof data.workspaceId === 'string') {
       const room = roomName(data.workspaceId);
+      roomLog('msg workspace:leave', { socketId: ud.socketId, workspaceId: data.workspaceId });
       ws.unsubscribe(room);
-      ws.userData.rooms.delete(room);
-      releaseRoom(room, ws.userData.socketId);
+      ud.rooms.delete(room);
+      releaseRoom(room, ud.socketId);
       ws.send(JSON.stringify({ type: 'workspace:left', workspaceId: data.workspaceId }));
     }
   },
   close: (ws) => {
-    if (!ws.userData.rooms) return;
-    ws.userData.rooms.forEach((room) => {
-      releaseRoom(room, ws.userData.socketId);
+    const ud = ws.getUserData();
+    if (!ud.rooms) return;
+    roomLog('ws close cleanup', {
+      socketId: ud.socketId,
+      rooms: ud.rooms.size,
+    });
+    ud.rooms.forEach((room) => {
+      releaseRoom(room, ud.socketId);
     });
   },
   upgrade: (res, req, context) => {
@@ -152,6 +211,12 @@ app.ws('/api/wss', {
     const workspaceId = query.get('workspaceId') || '';
     const socketId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const cookie = req.getHeader('cookie') || '';
+
+    wssTrace('upgrade', {
+      socketId,
+      workspaceId: workspaceId || null,
+      hasCookie: Boolean(cookie && cookie.length > 0),
+    });
 
     res.upgrade(
       {
@@ -191,6 +256,63 @@ app.post('/internal/events/client-start', (res, req) => {
   });
 });
 
+function internalEventsAuth(res, req) {
+  const secret = req.getHeader('x-wss-shared-secret');
+  if (WSS_SHARED_SECRET && secret !== WSS_SHARED_SECRET) {
+    sendJson(res, '401 Unauthorized', { ok: false });
+    return false;
+  }
+  return true;
+}
+
+app.post('/internal/events/action-created', (res, req) => {
+  if (!internalEventsAuth(res, req)) return;
+
+  collectJsonBody(res, (payload) => {
+    const workspaceIds = Array.isArray(payload.workspaceIds) ? payload.workspaceIds : [];
+    const action = payload.action && typeof payload.action === 'object' ? payload.action : {};
+    const ts = new Date().toISOString();
+    workspaceIds.forEach((workspaceId) => {
+      const room = roomName(workspaceId);
+      if (!roomConnections.has(room)) return;
+      app.publish(
+        room,
+        JSON.stringify({
+          type: 'action:created',
+          ts,
+          payload: { action },
+        }),
+      );
+    });
+    sendJson(res, '200 OK', { ok: true });
+  });
+});
+
+app.post('/internal/events/workspace-member-joined', (res, req) => {
+  if (!internalEventsAuth(res, req)) return;
+
+  collectJsonBody(res, (payload) => {
+    const workspaceId = typeof payload.workspaceId === 'string' ? payload.workspaceId : '';
+    if (!workspaceId) {
+      sendJson(res, '400 Bad Request', { ok: false, error: 'workspaceId required' });
+      return;
+    }
+    const room = roomName(workspaceId);
+    if (roomConnections.has(room)) {
+      const ts = new Date().toISOString();
+      app.publish(
+        room,
+        JSON.stringify({
+          type: 'workspace:member_joined',
+          ts,
+          payload,
+        }),
+      );
+    }
+    sendJson(res, '200 OK', { ok: true });
+  });
+});
+
 app.post('/api/wss/telegram/webhook/:secret', (res, req) => {
   const secret = req.getParameter(0);
   collectJsonBody(res, async (payload) => {
@@ -222,6 +344,12 @@ app.listen('0.0.0.0', PORT, (token) => {
   if (token) {
     // eslint-disable-next-line no-console
     console.log(`[wss] listening on ${PORT}`);
+    // eslint-disable-next-line no-console
+    console.log('[wss-room] config', {
+      roomTraceEnabled: ROOM_LOGS,
+      WSS_ROOM_LOGS: process.env.WSS_ROOM_LOGS ?? '(unset)',
+      hint: 'grep: wss-room OR [wss] upgrade|open',
+    });
     return;
   }
   // eslint-disable-next-line no-console

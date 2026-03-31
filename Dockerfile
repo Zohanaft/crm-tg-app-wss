@@ -9,4 +9,5 @@ COPY . .
 
 EXPOSE 3002
 
-CMD ["npm", "run", "start"]
+# Run node directly so Docker SIGTERM does not produce noisy "npm error" logs (npm is not PID 1).
+CMD ["node", "src/index.js"]
