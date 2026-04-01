@@ -296,6 +296,32 @@ app.post('/internal/events/action-created', (res, req) => {
   });
 });
 
+app.post('/internal/events/client-deleted', (res, req) => {
+  if (!internalEventsAuth(res, req)) return;
+
+  collectJsonBody(res, (payload) => {
+    const workspaceIds = Array.isArray(payload.workspaceIds) ? payload.workspaceIds : [];
+    const clientId = typeof payload.clientId === 'string' ? payload.clientId : '';
+    if (!clientId) {
+      sendJson(res, '400 Bad Request', { ok: false, error: 'clientId required' });
+      return;
+    }
+    workspaceIds.forEach((workspaceId) => {
+      const room = roomName(workspaceId);
+      if (!roomConnections.has(room)) return;
+      app.publish(
+        room,
+        JSON.stringify({
+          type: 'client:deleted',
+          ts: new Date().toISOString(),
+          payload: { clientId, workspaceIds },
+        }),
+      );
+    });
+    sendJson(res, '200 OK', { ok: true });
+  });
+});
+
 app.post('/internal/events/workspace-member-joined', (res, req) => {
   if (!internalEventsAuth(res, req)) return;
 
