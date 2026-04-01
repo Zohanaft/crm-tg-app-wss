@@ -76,16 +76,24 @@ function collectJsonBody(res, done) {
 
 async function authorizeWithCookie(accessCookie) {
   if (!accessCookie) return null;
-  const response = await fetch(`${BACKEND_INTERNAL_URL}/workspace/wss/auth`, {
-    method: 'GET',
-    headers: {
-      // Cookies are HttpOnly on the main domain; browser sends them automatically during WS handshake.
-      // We forward them to the backend so JwtStrategy can read `req.cookies.access_token`.
-      cookie: accessCookie,
-    },
-  });
-  if (!response.ok) return null;
-  return response.json();
+  try {
+    const response = await fetch(`${BACKEND_INTERNAL_URL}/workspace/wss/auth`, {
+      method: 'GET',
+      headers: {
+        // Cookies are HttpOnly on the main domain; browser sends them automatically during WS handshake.
+        // We forward them to the backend so JwtStrategy can read `req.cookies.access_token`.
+        cookie: accessCookie,
+      },
+    });
+    if (!response.ok) return null;
+    return response.json();
+  } catch (error) {
+    wssTrace('authorize fetch failed', {
+      backend: BACKEND_INTERNAL_URL,
+      error: String(error),
+    });
+    return null;
+  }
 }
 
 function touchRoom(workspaceId, socketId) {
