@@ -241,11 +241,7 @@ app.ws('/api/wss', {
 });
 
 app.post('/internal/events/client-start', (res, req) => {
-  const secret = req.getHeader('x-wss-shared-secret');
-  if (WSS_SHARED_SECRET && secret !== WSS_SHARED_SECRET) {
-    sendJson(res, '401 Unauthorized', { ok: false });
-    return;
-  }
+  if (!internalEventsAuth(res, req)) return;
 
   collectJsonBody(res, (payload) => {
     const workspaceIds = Array.isArray(payload.workspaceIds) ? payload.workspaceIds : [];
@@ -265,8 +261,15 @@ app.post('/internal/events/client-start', (res, req) => {
 });
 
 function internalEventsAuth(res, req) {
+  if (!WSS_SHARED_SECRET) {
+    sendJson(res, '503 Service Unavailable', {
+      ok: false,
+      error: 'WSS_SHARED_SECRET is not configured',
+    });
+    return false;
+  }
   const secret = req.getHeader('x-wss-shared-secret');
-  if (WSS_SHARED_SECRET && secret !== WSS_SHARED_SECRET) {
+  if (secret !== WSS_SHARED_SECRET) {
     sendJson(res, '401 Unauthorized', { ok: false });
     return false;
   }
@@ -359,13 +362,19 @@ app.post('/api/wss/telegram/webhook/:secret', (res, req) => {
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
-        sendJson(res, '502 Bad Gateway', { ok: false });
+        res.cork(() => {
+          sendJson(res, '502 Bad Gateway', { ok: false });
+        });
         return;
       }
       const data = await response.json();
-      sendJson(res, '200 OK', data);
+      res.cork(() => {
+        sendJson(res, '200 OK', data);
+      });
     } catch {
-      sendJson(res, '502 Bad Gateway', { ok: false });
+      res.cork(() => {
+        sendJson(res, '502 Bad Gateway', { ok: false });
+      });
     }
   });
 });
