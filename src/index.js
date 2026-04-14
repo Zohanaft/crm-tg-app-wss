@@ -37,6 +37,10 @@ function roomName(workspaceId) {
   return `workspace:${workspaceId}`;
 }
 
+function userRoomName(userId) {
+  return `user:${userId}`;
+}
+
 function safeJsonParse(input) {
   try {
     return JSON.parse(input);
@@ -121,6 +125,19 @@ function releaseRoom(room, socketId) {
   }
 }
 
+function touchUserRoom(userId, socketId) {
+  const room = userRoomName(userId);
+  const isNewRoom = !roomConnections.has(room);
+  if (isNewRoom) {
+    roomConnections.set(room, new Set());
+    roomLog('room created (first socket)', { room, userId, socketId });
+  }
+  roomConnections.get(room).add(socketId);
+  const members = roomConnections.get(room).size;
+  roomLog('socket joined room', { room, socketId, membersInRoom: members });
+  return room;
+}
+
 app.ws('/api/wss', {
   idleTimeout: 32,
   maxPayloadLength: 16 * 1024,
@@ -164,10 +181,19 @@ app.ws('/api/wss', {
       ud.rooms.add(room);
     });
 
+    const userId = typeof auth.userId === 'string' ? auth.userId.trim() : '';
+    if (userId) {
+      const userRoom = touchUserRoom(userId, ud.socketId);
+      ws.subscribe(userRoom);
+      ud.rooms.add(userRoom);
+      roomLog('open subscribe user room', { socketId: ud.socketId, userId });
+    }
+
     ws.send(
       JSON.stringify({
         type: 'wss:ready',
         workspaceIds,
+        userId: userId || undefined,
       }),
     );
   },
@@ -299,6 +325,32 @@ app.post('/internal/events/action-created', (res, req) => {
   });
 });
 
+app.post('/internal/events/user-action', (res, req) => {
+  if (!internalEventsAuth(res, req)) return;
+
+  collectJsonBody(res, (payload) => {
+    const userId = typeof payload.userId === 'string' ? payload.userId.trim() : '';
+    const action = payload.action && typeof payload.action === 'object' ? payload.action : {};
+    if (!userId) {
+      sendJson(res, '400 Bad Request', { ok: false, error: 'userId required' });
+      return;
+    }
+    const room = userRoomName(userId);
+    if (roomConnections.has(room)) {
+      const ts = new Date().toISOString();
+      app.publish(
+        room,
+        JSON.stringify({
+          type: 'action:created',
+          ts,
+          payload: { action },
+        }),
+      );
+    }
+    sendJson(res, '200 OK', { ok: true });
+  });
+});
+
 app.post('/internal/events/client-deleted', (res, req) => {
   if (!internalEventsAuth(res, req)) return;
 
@@ -334,17 +386,54 @@ app.post('/internal/events/workspace-member-joined', (res, req) => {
       sendJson(res, '400 Bad Request', { ok: false, error: 'workspaceId required' });
       return;
     }
+    const ts = new Date().toISOString();
+    const body = JSON.stringify({
+      type: 'workspace:member_joined',
+      ts,
+      payload,
+    });
     const room = roomName(workspaceId);
     if (roomConnections.has(room)) {
-      const ts = new Date().toISOString();
-      app.publish(
-        room,
-        JSON.stringify({
-          type: 'workspace:member_joined',
-          ts,
-          payload,
-        }),
-      );
+      app.publish(room, body);
+    }
+    const member = payload.member && typeof payload.member === 'object' ? payload.member : {};
+    const memberUserId = typeof member.userId === 'string' ? member.userId.trim() : '';
+    if (memberUserId) {
+      const uroom = userRoomName(memberUserId);
+      if (roomConnections.has(uroom)) {
+        app.publish(uroom, body);
+      }
+    }
+    sendJson(res, '200 OK', { ok: true });
+  });
+});
+
+app.post('/internal/events/workspace-member-removed', (res, req) => {
+  if (!internalEventsAuth(res, req)) return;
+
+  collectJsonBody(res, (payload) => {
+    const workspaceId = typeof payload.workspaceId === 'string' ? payload.workspaceId : '';
+    const removedUserId = typeof payload.removedUserId === 'string' ? payload.removedUserId : '';
+    if (!workspaceId || !removedUserId) {
+      sendJson(res, '400 Bad Request', {
+        ok: false,
+        error: 'workspaceId and removedUserId required',
+      });
+      return;
+    }
+    const ts = new Date().toISOString();
+    const body = JSON.stringify({
+      type: 'workspace:member_removed',
+      ts,
+      payload: { workspaceId, removedUserId },
+    });
+    const wr = roomName(workspaceId);
+    if (roomConnections.has(wr)) {
+      app.publish(wr, body);
+    }
+    const ur = userRoomName(removedUserId);
+    if (roomConnections.has(ur)) {
+      app.publish(ur, body);
     }
     sendJson(res, '200 OK', { ok: true });
   });
